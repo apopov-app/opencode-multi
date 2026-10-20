@@ -163,6 +163,7 @@ export default Plugin.define({
     const generations = new Map<string, number>()
     const stopVotes = new Map<string, Set<string>>()
     const continueRequests = new Set<string>()
+    let disposed = false
     // How many executions ever started on each session; speak() snapshots the
     // count before enqueueing its synthetic turn to detect that the turn has
     // actually begun (it may be queued, and wait() resolves instantly when
@@ -564,8 +565,7 @@ export default Plugin.define({
             delete metadata[META]
             await ctx.session.update({ sessionID, metadata })
             cache.delete(sessionID)
-            stopVotes.delete(sessionID)
-            cancelContinueForms(sessionID)
+            await stopRoom(sessionID)
             return
           }
 
@@ -574,10 +574,7 @@ export default Plugin.define({
             metadata[META] = { ...metadata[META], paused: lower === "pause" }
             await ctx.session.update({ sessionID, metadata })
             cache.delete(sessionID)
-            if (lower === "pause") {
-              cancelContinueForms(sessionID)
-              await ctx.session.interrupt({ sessionID }).catch(() => undefined)
-            }
+            if (lower === "pause") await stopRoom(sessionID)
             return
           }
 
@@ -665,6 +662,7 @@ export default Plugin.define({
     }
 
     async function speak(sessionID: string, participant: Participant, room: Room): Promise<Turn> {
+      if (disposed) return { ok: false, error: "interrupted" }
       try {
         await ctx.session.switchModel({
           sessionID,
@@ -764,6 +762,7 @@ export default Plugin.define({
     async function runChain(sessionID: string, generation: number): Promise<ChainEnd> {
       const room = await roomOf(sessionID)
       if (!room || room.paused) return "paused"
+      if (disposed) return "user"
 
       const messages = await ctx.session.context({ sessionID })
       const previous = lastAssistant(messages)
@@ -776,6 +775,7 @@ export default Plugin.define({
       let turns = 0
       let failures = 0
       while (room.maxTurns === 0 || turns < room.maxTurns) {
+        if (disposed) return "user"
         if (generations.get(sessionID) !== generation) return "user"
         const fresh = await roomOf(sessionID)
         if (!fresh || fresh.paused) return "paused"
@@ -792,6 +792,9 @@ export default Plugin.define({
           log("turn failed", keyOf(next), result.error)
           if (result.error === "interrupted") return "user"
           if (result.error === "timeout") return "failure"
+          // A turn that never started or produced no answer must not be retried
+          // in a loop: that only queues more synthetic turns.
+          if (result.error === "no-answer" || result.error === "execution-not-started") return "failure"
           // A persistently broken participant (switch-model/synthetic/turn
           // errors return immediately) must not spin the chain forever.
           failures += 1
@@ -814,6 +817,38 @@ export default Plugin.define({
       return "limit"
     }
 
+    async function cancelQueuedTurns(sessionID: string) {
+      try {
+        const list: any = await api(`/api/session/${sessionID}/inbox`)
+        for (const item of list?.data ?? []) {
+          if (item?.type !== "synthetic") continue
+          const text = String(item?.payload?.text ?? "")
+          if (!text.startsWith("[room]")) continue
+          const id = item.id ?? item.inboxID
+          if (id) await api(`/api/session/${sessionID}/inbox/${id}`, { method: "DELETE" })
+        }
+      } catch {}
+    }
+
+    async function cancelAllForms(sessionID: string) {
+      try {
+        const list: any = await api(`/api/session/${sessionID}/form`)
+        for (const form of list?.data ?? []) {
+          if (form?.id) await api(`/api/session/${sessionID}/form/${form.id}`, { method: "DELETE" }).catch(() => undefined)
+        }
+      } catch {}
+    }
+
+    async function stopRoom(sessionID: string) {
+      generations.set(sessionID, (generations.get(sessionID) ?? 0) + 1)
+      stopVotes.delete(sessionID)
+      continueRequests.delete(sessionID)
+      cancelContinueForms(sessionID)
+      await ctx.session.interrupt({ sessionID }).catch(() => undefined)
+      await cancelQueuedTurns(sessionID)
+      await cancelAllForms(sessionID)
+    }
+
     function cancelContinueForms(sessionID: string) {
       for (const [id, pending] of continueForms) {
         if (pending.sessionID !== sessionID) continue
@@ -823,6 +858,7 @@ export default Plugin.define({
     }
 
     async function openContinueForm(sessionID: string, reason: ChainEnd, generation: number) {
+      if (disposed) return
       try {
         if (generations.get(sessionID) !== generation) return
         const room = await roomOf(sessionID)
@@ -856,6 +892,7 @@ export default Plugin.define({
     }
 
     async function startChain(sessionID: string) {
+      if (disposed) return
       if (running.has(sessionID)) {
         deferred.add(sessionID)
         return
@@ -864,6 +901,9 @@ export default Plugin.define({
       if (!room || room.paused) return
       if (votedAll(sessionID, room)) return
       if (!(await idle(sessionID))) return
+      if (disposed) return
+      // Drop synthetic turns queued by a previous (possibly reloaded) chain.
+      await cancelQueuedTurns(sessionID)
       running.add(sessionID)
       const generation = generations.get(sessionID) ?? 0
       let reason: ChainEnd | undefined
@@ -965,7 +1005,10 @@ export default Plugin.define({
               continueForms.delete(data.id)
               const raw = data.answer?.action
               const action = Array.isArray(raw) ? raw[0] : raw
-              if (action !== "continue") break
+              if (action !== "continue") {
+                await stopRoom(cont.sessionID)
+                break
+              }
               if (generations.get(cont.sessionID) !== cont.generation) break
               if (running.has(cont.sessionID)) break
               const room = await roomOf(cont.sessionID)
@@ -990,10 +1033,14 @@ export default Plugin.define({
     log("ready in", ctx.location.directory)
 
     return () => {
+      disposed = true
       controller.abort()
       cache.clear()
       waiters.clear()
       startedCount.clear()
+      stopVotes.clear()
+      continueRequests.clear()
+      continueForms.clear()
     }
   },
 })
