@@ -1,0 +1,6 @@
+{
+  "maxTurns": 50,
+  "turnsPerModel": 0,
+  "turnTimeoutMs": 240000,
+  "providers": "current"
+}

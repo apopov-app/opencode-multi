@@ -1,0 +1,59 @@
+{
+  "name": "opencode-multi",
+  "version": "0.1.0",
+  "description": "Multi-agent rooms for OpenCode: several models talk in one session, see the whole dialog, pass the floor with @mentions and vote to stop.",
+  "type": "module",
+  "exports": {
+    ".": "./.opencode/plugins/multi/index.ts",
+    "./tui": "./.opencode/plugins/multi/tui.ts"
+  },
+  "files": [
+    ".opencode/plugins/multi/index.ts",
+    ".opencode/plugins/multi/tui.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "multi-agent",
+    "ai",
+    "llm"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/apopov-app/opencode-multi.git"
+  },
+  "homepage": "https://github.com/apopov-app/opencode-multi#readme",
+  "bugs": {
+    "url": "https://github.com/apopov-app/opencode-multi/issues"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.32"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.17",
+    "@opentui/solid": ">=0.5.17",
+    "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
