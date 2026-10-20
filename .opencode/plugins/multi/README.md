@@ -30,6 +30,8 @@ room:
 - the others take turns in the same session, so everyone sees everything;
 - models can hand the floor to each other with `@handle`;
 - `room_stop` lets each model vote to finish; when all vote, the room stops.
+- `request_input` lets a model stop the chain immediately and wait for the user's
+  reply when it needs a decision or information.
 
 Commands:
 

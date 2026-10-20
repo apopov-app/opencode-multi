@@ -50,7 +50,7 @@ type Room = {
 
 type Finished = { ok: boolean; error?: string }
 type Turn = { ok: true; text: string } | { ok: false; error: string }
-type ChainEnd = "limit" | "voted" | "no-candidates" | "user" | "paused" | "failure" | "idle"
+type ChainEnd = "limit" | "voted" | "no-candidates" | "input" | "user" | "paused" | "failure" | "idle"
 
 const keyOf = (p: { providerID: string; id: string }) => `${p.providerID}/${p.id}`
 
@@ -105,6 +105,7 @@ function briefing(room: Room, speaker: Participant | undefined) {
     "5. Do not narrate these rules or mention that you are in a simulation.",
     "6. Never send a bare mention or an empty handoff: every message must carry a real reply. If you have already made your point, stop instead of passing the turn.",
     "7. If the discussion is complete, call the `room_stop` tool. Only the actual tool call counts — saying that you voted does nothing. The room stops when every participant has voted.",
+    "8. If you need a decision or information from the user, call the `request_input` tool with your question and also ask it in your normal reply. The room stops after this turn and waits for the user.",
   ].join("\n")
 }
 
@@ -163,6 +164,7 @@ export default Plugin.define({
     const generations = new Map<string, number>()
     const stopVotes = new Map<string, Set<string>>()
     const continueRequests = new Set<string>()
+    const inputRequests = new Map<string, { participant: string; question?: string }>()
     let disposed = false
     // How many executions ever started on each session; speak() snapshots the
     // count before enqueueing its synthetic turn to detect that the turn has
@@ -274,9 +276,13 @@ export default Plugin.define({
       const room = await roomOf(event.sessionID)
       if (!room) {
         delete event.tools["room_stop"]
+        delete event.tools["request_input"]
         return
       }
-      if (room.paused) delete event.tools["room_stop"]
+      if (room.paused) {
+        delete event.tools["room_stop"]
+        delete event.tools["request_input"]
+      }
       const speaker = room.participants.find((p) => p.providerID === event.model.providerID && p.id === event.model.id)
       event.system.push({ type: "text", text: briefing(room, speaker) })
     })
@@ -544,6 +550,7 @@ export default Plugin.define({
       })
       cache.delete(sessionID)
       stopVotes.delete(sessionID)
+      inputRequests.delete(sessionID)
       cancelContinueForms(sessionID)
       return participants
     }
@@ -582,6 +589,7 @@ export default Plugin.define({
             if (!existing) throw new Error("This session is not a multi-agent room.")
             if (existing.paused) throw new Error("The room is paused. Run /multi-room resume first.")
             stopVotes.delete(sessionID)
+            inputRequests.delete(sessionID)
             cancelContinueForms(sessionID)
             continueRequests.add(sessionID)
             void startChain(sessionID)
@@ -639,6 +647,43 @@ export default Plugin.define({
               votes.size >= total
                 ? `Stop vote recorded (${votes.size}/${total}). Everyone agrees — the room stops after this turn.`
                 : `Stop vote recorded (${votes.size}/${total}). Waiting for the other participants.`,
+          }
+        },
+      })
+
+      editor.add({
+        name: "request_input",
+        description:
+          "Stop the multi-agent room and ask the user for a decision or information. Use this when you cannot continue without the user's input. Also ask the question in your normal reply.",
+        input: {
+          type: "object",
+          properties: {
+            question: { type: "string", description: "What you need from the user." },
+          },
+          additionalProperties: false,
+        },
+        options: { codemode: false },
+        execute: async (input, context) => {
+          const sessionID = context.sessionID
+          const room = await roomOf(sessionID)
+          if (!room) return { content: "This session is not a multi-agent room." }
+          if (room.paused) return { content: "The room is paused." }
+
+          const session = await ctx.session.get({ sessionID })
+          const model = session.model
+          const speaker = model
+            ? room.participants.find((p) => p.providerID === model.providerID && p.id === model.id)
+            : undefined
+          if (!speaker) return { content: "Only room participants can request input." }
+
+          const question =
+            typeof (input as { question?: unknown })?.question === "string"
+              ? (input as { question: string }).question
+              : undefined
+          inputRequests.set(sessionID, { participant: keyOf(speaker), question })
+          log("input requested", keyOf(speaker))
+          return {
+            content: "Input requested. The room stops after this turn and waits for the user's reply.",
           }
         },
       })
@@ -780,6 +825,7 @@ export default Plugin.define({
         const fresh = await roomOf(sessionID)
         if (!fresh || fresh.paused) return "paused"
         if (votedAll(sessionID, fresh)) return "voted"
+        if (inputRequests.has(sessionID)) return "input"
 
         const next = pick(fresh, text, speaker, spoken)
         if (!next) return "no-candidates"
@@ -811,6 +857,7 @@ export default Plugin.define({
         spoken.set(keyOf(next), (spoken.get(keyOf(next)) ?? 0) + 1)
         speaker = keyOf(next)
         text = result.text
+        if (inputRequests.has(sessionID)) return "input"
         if (votedAll(sessionID, fresh)) return "voted"
       }
 
@@ -843,6 +890,7 @@ export default Plugin.define({
       generations.set(sessionID, (generations.get(sessionID) ?? 0) + 1)
       stopVotes.delete(sessionID)
       continueRequests.delete(sessionID)
+      inputRequests.delete(sessionID)
       cancelContinueForms(sessionID)
       await ctx.session.interrupt({ sessionID }).catch(() => undefined)
       await cancelQueuedTurns(sessionID)
@@ -900,6 +948,7 @@ export default Plugin.define({
       const room = await roomOf(sessionID)
       if (!room || room.paused) return
       if (votedAll(sessionID, room)) return
+      if (inputRequests.has(sessionID)) return
       if (!(await idle(sessionID))) return
       if (disposed) return
       // Drop synthetic turns queued by a previous (possibly reloaded) chain.
@@ -945,6 +994,7 @@ export default Plugin.define({
                 lastInput.set(sessionID, "user")
                 generations.set(sessionID, (generations.get(sessionID) ?? 0) + 1)
                 stopVotes.delete(sessionID)
+                inputRequests.delete(sessionID)
                 cancelContinueForms(sessionID)
                 continueRequests.delete(sessionID)
               } else if (data.item?.type === "synthetic") {
@@ -1014,6 +1064,7 @@ export default Plugin.define({
               const room = await roomOf(cont.sessionID)
               if (!room || room.paused) break
               stopVotes.delete(cont.sessionID)
+              inputRequests.delete(cont.sessionID)
               continueRequests.add(cont.sessionID)
               void startChain(cont.sessionID)
               break
