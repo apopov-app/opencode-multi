@@ -32,6 +32,9 @@ room:
 - `room_stop` lets each model vote to finish; when all vote, the room stops.
 - `request_input` lets a model stop the chain immediately and wait for the user's
   reply when it needs a decision or information.
+- Stop votes are stored in session metadata and accumulate across chains; they are
+  cleared only when everyone voted, the room composition changes, or the room is
+  paused/stopped/continued manually.
 
 Commands:
 

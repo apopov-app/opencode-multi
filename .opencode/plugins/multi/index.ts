@@ -193,12 +193,38 @@ export default Plugin.define({
       if (cached && Date.now() - cached.at < 3_000) return cached.room
       try {
         const session = await ctx.session.get({ sessionID })
-        const room = normalizeRoom((session.metadata as any)?.[META])
+        const raw = (session.metadata as any)?.[META]
+        const room = normalizeRoom(raw)
+        // Votes live in session metadata so they survive plugin reloads and
+        // accumulate across chains until the stop actually happens.
+        const stored = Array.isArray(raw?.votes)
+          ? raw.votes.filter((value: unknown): value is string => typeof value === "string")
+          : []
+        if (room && stored.length > 0) {
+          const votes = stopVotes.get(sessionID) ?? new Set<string>()
+          for (const key of stored) votes.add(key)
+          stopVotes.set(sessionID, votes)
+        }
         cache.set(sessionID, { room, at: Date.now() })
         return room
       } catch {
         return null
       }
+    }
+
+    async function clearVotes(sessionID: string) {
+      stopVotes.delete(sessionID)
+      try {
+        const session = await ctx.session.get({ sessionID })
+        const raw = (session.metadata as any)?.[META]
+        if (!raw || !Array.isArray(raw.votes)) return
+        const metadata: Record<string, any> = { ...(session.metadata ?? {}) }
+        const next = { ...raw }
+        delete next.votes
+        metadata[META] = next
+        await ctx.session.update({ sessionID, metadata })
+        cache.delete(sessionID)
+      } catch {}
     }
 
     // The waiter only resolves on `session.execution.interrupted`, on an
@@ -546,6 +572,7 @@ export default Plugin.define({
         maxTurns: config.maxTurns ?? DEFAULT_MAX_TURNS,
         turnsPerModel: config.turnsPerModel ?? DEFAULT_TURNS_PER_MODEL,
         turnTimeoutMs: config.turnTimeoutMs ?? DEFAULT_TIMEOUT_MS,
+        votes: [],
       }
 
       await ctx.session.update({ sessionID, metadata, title: roomTitle(participants) })
@@ -593,7 +620,7 @@ export default Plugin.define({
           if (lower === "continue") {
             if (!existing) throw new Error("This session is not a multi-agent room.")
             if (existing.paused) throw new Error("The room is paused. Run /multi-room resume first.")
-            stopVotes.delete(sessionID)
+            await clearVotes(sessionID)
             inputRequests.delete(sessionID)
             cancelContinueForms(sessionID)
             continueRequests.add(sessionID)
@@ -646,6 +673,14 @@ export default Plugin.define({
           votes.add(keyOf(speaker))
           stopVotes.set(sessionID, votes)
           const total = room.participants.length
+          // Persist the whole vote set in session metadata: votes survive
+          // plugin reloads and carry over to the next chain.
+          try {
+            const metadata: Record<string, any> = { ...(session.metadata ?? {}) }
+            metadata[META] = { ...(metadata[META] as any), votes: [...votes] }
+            await ctx.session.update({ sessionID, metadata })
+            cache.delete(sessionID)
+          } catch {}
           log("stop vote", `${votes.size}/${total}`, keyOf(speaker))
           return {
             content:
@@ -829,7 +864,10 @@ export default Plugin.define({
         if (generations.get(sessionID) !== generation) return "user"
         const fresh = await roomOf(sessionID)
         if (!fresh || fresh.paused) return "paused"
-        if (votedAll(sessionID, fresh)) return "voted"
+        if (votedAll(sessionID, fresh)) {
+          await clearVotes(sessionID)
+          return "voted"
+        }
         if (inputRequests.has(sessionID)) return "input"
 
         const next = pick(fresh, text, speaker, spoken)
@@ -863,7 +901,10 @@ export default Plugin.define({
         speaker = keyOf(next)
         text = result.text
         if (inputRequests.has(sessionID)) return "input"
-        if (votedAll(sessionID, fresh)) return "voted"
+        if (votedAll(sessionID, fresh)) {
+          await clearVotes(sessionID)
+          return "voted"
+        }
       }
 
       return "limit"
@@ -893,7 +934,7 @@ export default Plugin.define({
 
     async function stopRoom(sessionID: string) {
       generations.set(sessionID, (generations.get(sessionID) ?? 0) + 1)
-      stopVotes.delete(sessionID)
+      await clearVotes(sessionID)
       continueRequests.delete(sessionID)
       inputRequests.delete(sessionID)
       cancelContinueForms(sessionID)
@@ -952,7 +993,10 @@ export default Plugin.define({
       }
       const room = await roomOf(sessionID)
       if (!room || room.paused) return
-      if (votedAll(sessionID, room)) return
+      if (votedAll(sessionID, room)) {
+        await clearVotes(sessionID)
+        return
+      }
       if (inputRequests.has(sessionID)) return
       if (!(await idle(sessionID))) return
       if (disposed) return
@@ -998,7 +1042,6 @@ export default Plugin.define({
               if (data.item?.type === "user") {
                 lastInput.set(sessionID, "user")
                 generations.set(sessionID, (generations.get(sessionID) ?? 0) + 1)
-                stopVotes.delete(sessionID)
                 inputRequests.delete(sessionID)
                 cancelContinueForms(sessionID)
                 continueRequests.delete(sessionID)
@@ -1068,7 +1111,7 @@ export default Plugin.define({
               if (running.has(cont.sessionID)) break
               const room = await roomOf(cont.sessionID)
               if (!room || room.paused) break
-              stopVotes.delete(cont.sessionID)
+              await clearVotes(cont.sessionID)
               inputRequests.delete(cont.sessionID)
               continueRequests.add(cont.sessionID)
               void startChain(cont.sessionID)
