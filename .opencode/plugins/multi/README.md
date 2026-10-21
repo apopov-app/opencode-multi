@@ -53,7 +53,7 @@ In the TUI, `/multi` opens a searchable picker and a room menu.
   "maxTurns": 50,
   "turnsPerModel": 0,
   "turnTimeoutMs": 240000,
-  "providers": "current"
+  "providers": "auto"
 }
 ```
 
@@ -63,8 +63,9 @@ In the TUI, `/multi` opens a searchable picker and a room menu.
 - When a chain stops by itself (turn cap, all voted, no eligible turns), a
   Continue/Stop question appears in the composer dock (desktop and TUI).
 - `turnTimeoutMs`: per-turn timeout for a hung provider (default 4 min).
-- `providers`: `"current"` (models of the session's provider), `"all"` (tabs per
-  provider), or an array of provider IDs.
+- `providers`: `"auto"` (default: all providers except the keyless free
+  `opencode`, plus the session model's provider), `"current"` (session provider
+  only), `"all"` (everything), or an array of provider IDs.
 
 ## Notes
 

@@ -291,7 +291,7 @@ export default Plugin.define({
       maxTurns?: number
       turnsPerModel?: number
       turnTimeoutMs?: number
-      providers?: string[] | "all"
+      providers?: string[] | "all" | "current" | "auto"
     }
 
     async function readConfig(): Promise<MultiConfig> {
@@ -415,14 +415,19 @@ export default Plugin.define({
         (model) => model.enabled !== false && model.capabilities?.tools !== false,
       )
       const preferred = session.model?.providerID
-      const requested =
-        config.providers === "all"
-          ? undefined
-          : Array.isArray(config.providers)
-            ? config.providers
-            : preferred
-              ? [preferred]
-              : undefined
+      const providerIDs = [...new Set(enabled.map((model) => model.providerID))]
+
+      let requested: string[] | undefined
+      if (config.providers === "all") requested = undefined
+      else if (Array.isArray(config.providers)) requested = config.providers
+      else if (config.providers === "current") requested = preferred ? [preferred] : undefined
+      else {
+        // "auto" (default): every provider except the keyless free catalog,
+        // plus the provider of the current session model.
+        const auto = providerIDs.filter((id) => id !== "opencode")
+        if (preferred && !auto.includes(preferred)) auto.push(preferred)
+        requested = auto.length > 0 ? auto : providerIDs
+      }
 
       const scoped = requested ? enabled.filter((model) => requested.includes(model.providerID)) : enabled
       // A single provider with one usable model is useless for a room; fall back
